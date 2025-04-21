@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.ticker import FuncFormatter, PercentFormatter # Для форматирования осей
 from scipy.stats import spearmanr # Для анализа чувствительности
+import warnings
+
+# --- Подавление FutureWarnings от seaborn/matplotlib ---
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # --- Настройка стилей графиков ---
 sns.set_theme(style="whitegrid")
@@ -17,13 +21,9 @@ plt.rcParams['figure.figsize'] = (12, 6) # Размер графиков по у
 # Попробуем установить русскую локаль для форматирования чисел, если возможно
 try:
     import locale
-    # Указываем русскую локаль для форматирования чисел (может потребовать установки локали в системе)
-    # locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8') # или 'Russian_Russia.1251' для Windows
-    # plt.rcParams['axes.formatter.use_locale'] = True # Использовать локаль для форматирования чисел
-    # Если локаль не установлена, используем стандартное форматирование
-    print("Попытка установить русскую локаль для графиков...")
-    # locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8') # Закомментировано, т.к. требует настройки системы
-    # print("Русская локаль установлена.")
+    # locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8') # Закомментировано
+    # plt.rcParams['axes.formatter.use_locale'] = True
+    # print("Русская локаль для графиков установлена.")
 except ImportError:
     print("Модуль locale не найден, используется стандартное форматирование чисел.")
 except Exception as e:
@@ -116,40 +116,26 @@ CALC_NPV_RUB = "Расчет_NPV_Накопленный_Руб"
 CALC_DISCOUNTED_ROI_PCT = "Расчет_Дисконтированный_ROI_%"
 
 
-def safe_divide(numerator, denominator, default=0.0):
+def safe_divide_np(numerator, denominator, default=0.0):
     """
-    Безопасное деление для pandas Series/чисел.
-    Возвращает default при делении на ноль, NaN или бесконечность в знаменателе,
-    а также если числитель NaN.
+    Безопасное деление для numpy массивов.
+    Возвращает default при делении на ноль, NaN или бесконечность.
     """
-    # Преобразуем в Series, если это не так, для единообразной обработки
-    num = pd.Series(numerator) if not isinstance(numerator, (pd.Series, pd.DataFrame)) else numerator
-    den = pd.Series(denominator) if not isinstance(denominator, (pd.Series, pd.DataFrame)) else denominator
-
-    # Создаем копию результата, инициализированную значением по умолчанию
-    # Убедимся, что индекс совпадает с числителем (или знаменателем, если числитель - скаляр)
-    index_ref = num.index if isinstance(num, pd.Series) else den.index
-    result = pd.Series(default, index=index_ref)
-
-
-    # Определяем маску для корректных операций деления
-    # Знаменатель не должен быть 0 или NaN, числитель не должен быть NaN
-    valid_mask = ~(den.isna() | (den == 0) | num.isna())
-
-    # Выполняем деление только для корректных значений
-    # Используем .loc для избежания SettingWithCopyWarning
-    # Убедимся, что выравнивание индексов происходит правильно
-    num_aligned, den_aligned = num.align(den, copy=False)
-    result.loc[valid_mask] = num_aligned.loc[valid_mask] / den_aligned.loc[valid_mask]
-
-
-    # Заменяем возможные бесконечности (хотя их не должно быть при den != 0)
-    result = result.replace([np.inf, -np.inf], default)
-
-    # Если на входе были скаляры, возвращаем скаляр
-    if isinstance(numerator, (int, float)) and isinstance(denominator, (int, float)):
-        return result.iloc[0] if not result.empty else default
-
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = np.divide(numerator, denominator)
+        result[~np.isfinite(result)] = default # Заменяем inf, -inf, NaN
+        # Также обрабатываем случаи, когда знаменатель был 0 или NaN изначально
+        if np.isscalar(denominator):
+             if denominator == 0 or np.isnan(denominator):
+                 result.fill(default)
+        else:
+            result[denominator == 0] = default
+            result[np.isnan(denominator)] = default
+        if np.isscalar(numerator):
+            if np.isnan(numerator):
+                result.fill(default)
+        else:
+            result[np.isnan(numerator)] = default
     return result
 
 
@@ -204,106 +190,92 @@ def load_data(csv_path):
         print(f"Ошибка при чтении или обработке CSV файла {csv_path}: {e}")
         sys.exit(1)
 
-# --- Функции расчета метрик ---
-def calculate_metrics(df):
-    """Рассчитывает все метрики и добавляет их в DataFrame."""
+# --- Функции расчета метрик (для DataFrame) ---
+def calculate_metrics_df(df):
+    """Рассчитывает все метрики и добавляет их в DataFrame (для детерминированного расчета)."""
     # Оптимизация процессов
-    df[METRIC_AVG_PROC_TIME_HOURS] = safe_divide(df[COL_TOTAL_PROC_TIME_HOURS], df[COL_TOTAL_REQUESTS])
-    df[METRIC_THROUGHPUT_PER_DAY] = safe_divide(df[COL_TOTAL_REQUESTS], df[COL_PERIOD_DAYS])
-    df[METRIC_COST_PER_REQUEST_RUB] = safe_divide(df[COL_TOTAL_OPERATING_COSTS_RUB], df[COL_TOTAL_REQUESTS])
-    # Экономия времени = (Старое время - Новое время) * Кол-во запросов
+    df[METRIC_AVG_PROC_TIME_HOURS] = safe_divide_np(df[COL_TOTAL_PROC_TIME_HOURS], df[COL_TOTAL_REQUESTS])
+    df[METRIC_THROUGHPUT_PER_DAY] = safe_divide_np(df[COL_TOTAL_REQUESTS], df[COL_PERIOD_DAYS])
+    df[METRIC_COST_PER_REQUEST_RUB] = safe_divide_np(df[COL_TOTAL_OPERATING_COSTS_RUB], df[COL_TOTAL_REQUESTS])
     df[METRIC_HOURS_SAVED] = (df[COL_AVG_PROC_TIME_BEFORE_AI_HOURS] - df[METRIC_AVG_PROC_TIME_HOURS]) * df[COL_TOTAL_REQUESTS]
-    # Ограничим снизу нулем, т.к. экономия не может быть отрицательной в данном контексте
     df[METRIC_HOURS_SAVED] = df[METRIC_HOURS_SAVED].clip(lower=0)
 
     # Качество обслуживания
-    df[METRIC_CSAT_PCT] = safe_divide(df[COL_CSAT_GOOD_EXCELLENT] * 100, df[COL_CSAT_TOTAL_RATINGS])
-    df[METRIC_NPS] = safe_divide((df[COL_NPS_PROMOTERS] - df[COL_NPS_DETRACTORS]) * 100, df[COL_NPS_TOTAL_RESPONDENTS])
-    df[METRIC_FCR_PCT] = safe_divide(df[COL_FCR_RESOLVED_FIRST_TIME] * 100, df[COL_TOTAL_REQUESTS])
+    df[METRIC_CSAT_PCT] = safe_divide_np(df[COL_CSAT_GOOD_EXCELLENT] * 100, df[COL_CSAT_TOTAL_RATINGS])
+    df[METRIC_NPS] = safe_divide_np((df[COL_NPS_PROMOTERS] - df[COL_NPS_DETRACTORS]) * 100, df[COL_NPS_TOTAL_RESPONDENTS])
+    df[METRIC_FCR_PCT] = safe_divide_np(df[COL_FCR_RESOLVED_FIRST_TIME] * 100, df[COL_TOTAL_REQUESTS])
 
     # Своевременность и точность
-    df[METRIC_ON_TIME_PCT] = safe_divide(df[COL_RESOLVED_ON_TIME] * 100, df[COL_TOTAL_REQUESTS])
-    df[METRIC_ERROR_RATE_PCT] = safe_divide(df[COL_ERRORS_CORRECTIONS] * 100, df[COL_TOTAL_REQUESTS])
+    df[METRIC_ON_TIME_PCT] = safe_divide_np(df[COL_RESOLVED_ON_TIME] * 100, df[COL_TOTAL_REQUESTS])
+    df[METRIC_ERROR_RATE_PCT] = safe_divide_np(df[COL_ERRORS_CORRECTIONS] * 100, df[COL_TOTAL_REQUESTS])
 
     # Приоритизация
-    df[METRIC_AVG_HIGH_PRIORITY_REACTION_TIME_HOURS] = safe_divide(df[COL_HIGH_PRIORITY_REACTION_TIME_HOURS], df[COL_HIGH_PRIORITY_REQUESTS])
-    avg_low_priority_time = safe_divide(df[COL_LOW_PRIORITY_RESOLUTION_TIME_HOURS], df[COL_LOW_PRIORITY_REQUESTS])
-    df[METRIC_PRIORITIZATION_RATIO] = safe_divide(avg_low_priority_time, df[METRIC_AVG_HIGH_PRIORITY_REACTION_TIME_HOURS])
+    df[METRIC_AVG_HIGH_PRIORITY_REACTION_TIME_HOURS] = safe_divide_np(df[COL_HIGH_PRIORITY_REACTION_TIME_HOURS], df[COL_HIGH_PRIORITY_REQUESTS])
+    avg_low_priority_time = safe_divide_np(df[COL_LOW_PRIORITY_RESOLUTION_TIME_HOURS], df[COL_LOW_PRIORITY_REQUESTS])
+    df[METRIC_PRIORITIZATION_RATIO] = safe_divide_np(avg_low_priority_time, df[METRIC_AVG_HIGH_PRIORITY_REACTION_TIME_HOURS])
 
     # Подсказки по срокам
-    df[METRIC_FORECAST_MAE_HOURS] = safe_divide(df[COL_FORECAST_ABS_ERROR_HOURS], df[COL_REQUESTS_WITH_FORECAST])
-    df[METRIC_ON_AI_TARGET_PCT] = safe_divide(df[COL_RESOLVED_ON_AI_TIME] * 100, df[COL_REQUESTS_WITH_FORECAST])
+    df[METRIC_FORECAST_MAE_HOURS] = safe_divide_np(df[COL_FORECAST_ABS_ERROR_HOURS], df[COL_REQUESTS_WITH_FORECAST])
+    df[METRIC_ON_AI_TARGET_PCT] = safe_divide_np(df[COL_RESOLVED_ON_AI_TIME] * 100, df[COL_REQUESTS_WITH_FORECAST])
 
     # Обработка текстовых запросов
-    df[METRIC_TEXT_AUTOMATION_RATE_PCT] = safe_divide(df[COL_TEXT_PROCESSED_BY_AI] * 100, df[COL_TOTAL_TEXT_REQUESTS])
-    df[METRIC_TEXT_ACCURACY_PCT] = safe_divide(df[COL_TEXT_INTERPRETED_CORRECTLY] * 100, df[COL_TEXT_PROCESSED_BY_AI]) # Точность от числа обработанных ИИ
-    df[METRIC_AVG_TEXT_PROC_TIME_HOURS] = safe_divide(df[COL_TOTAL_TEXT_PROC_TIME_HOURS], df[COL_TOTAL_TEXT_REQUESTS])
+    df[METRIC_TEXT_AUTOMATION_RATE_PCT] = safe_divide_np(df[COL_TEXT_PROCESSED_BY_AI] * 100, df[COL_TOTAL_TEXT_REQUESTS])
+    df[METRIC_TEXT_ACCURACY_PCT] = safe_divide_np(df[COL_TEXT_INTERPRETED_CORRECTLY] * 100, df[COL_TEXT_PROCESSED_BY_AI])
+    df[METRIC_AVG_TEXT_PROC_TIME_HOURS] = safe_divide_np(df[COL_TOTAL_TEXT_PROC_TIME_HOURS], df[COL_TOTAL_TEXT_REQUESTS])
 
     # Удовлетворенность и доверие
     total_online_offline = df[COL_ONLINE_REQUESTS] + df[COL_OFFLINE_REQUESTS]
-    df[METRIC_ONLINE_ENGAGEMENT_PCT] = safe_divide(df[COL_ONLINE_REQUESTS] * 100, total_online_offline)
+    df[METRIC_ONLINE_ENGAGEMENT_PCT] = safe_divide_np(df[COL_ONLINE_REQUESTS] * 100, total_online_offline)
 
     return df
 
-# --- Функции расчета денежных эффектов ---
-def calculate_economic_effects(df):
-    """Рассчитывает денежные эффекты и добавляет их в DataFrame."""
-    # 1. Экономия ФОТ за счет сокращения времени обработки
+# --- Функции расчета денежных эффектов (для DataFrame) ---
+def calculate_economic_effects_df(df):
+    """Рассчитывает денежные эффекты и добавляет их в DataFrame (для детерминированного расчета)."""
     df[EFFECT_FOT_SAVINGS_RUB] = df[METRIC_HOURS_SAVED] * df[COL_COST_PER_HOUR_RUB]
-
-    # 2. Экономия на обработке текстовых запросов
     df[EFFECT_TEXT_PROC_SAVINGS_RUB] = df[COL_TEXT_PROCESSED_BY_AI] * df[COL_AVG_TEXT_PROC_MANUAL_HOURS] * df[COL_COST_PER_HOUR_RUB]
-
     return df
 
-# --- Функция расчета ROI и NPV ---
-def calculate_roi_npv(df):
-    """Рассчитывает совокупную выгоду, ROI, NPV и дисконтированный ROI."""
-
-    # Убедимся, что все столбцы эффектов существуют, иначе создадим их с нулями
+# --- Функция расчета ROI и NPV (для DataFrame) ---
+def calculate_roi_npv_df(df):
+    """Рассчитывает совокупную выгоду, ROI, NPV и дисконтированный ROI (для детерминированного расчета)."""
     for col in ECONOMIC_EFFECT_COLUMNS:
         if col not in df.columns:
-            # print(f"Предупреждение: Столбец эффекта '{col}' не найден, будет использован 0.") # Подавляем в симуляции
             df[col] = 0
 
-    # 1. Расчет совокупной выгоды (номинальной)
     existing_effect_cols = [col for col in ECONOMIC_EFFECT_COLUMNS if col in df.columns]
     if not existing_effect_cols:
-         # print("Предупреждение: Не найдено столбцов с экономическими эффектами для расчета выгоды.") # Подавляем в симуляции
          df[CALC_TOTAL_BENEFIT_RUB] = 0
     else:
         df[CALC_TOTAL_BENEFIT_RUB] = df[existing_effect_cols].sum(axis=1)
 
-    # 2. Расчет ROI (номинального)
-    df[CALC_ROI_PCT] = safe_divide(
+    df[CALC_ROI_PCT] = safe_divide_np(
         (df[CALC_TOTAL_BENEFIT_RUB] - df[COL_PROJECT_COSTS_RUB]),
         df[COL_PROJECT_COSTS_RUB],
         default=0.0
     ) * 100
 
-    # 3. Расчет дисконтированных показателей (NPV, Дисконтированный ROI)
-    # Определяем номер периода в годах (0, 0.5, 1.0, 1.5, ...)
     df[CALC_PERIOD_YEAR] = df.index * 0.5
-
-    # Расчет фактора дисконтирования
     discount_rate = df[COL_DISCOUNT_RATE_ANNUAL_PCT] / 100.0
     df[CALC_DISCOUNT_FACTOR] = 1 / (1 + discount_rate)**df[CALC_PERIOD_YEAR]
 
-    # Расчет дисконтированных потоков
     df[CALC_DISCOUNTED_BENEFIT_RUB] = df[CALC_TOTAL_BENEFIT_RUB] * df[CALC_DISCOUNT_FACTOR]
     df[CALC_DISCOUNTED_COST_RUB] = df[COL_PROJECT_COSTS_RUB] * df[CALC_DISCOUNT_FACTOR]
     df[CALC_DISCOUNTED_CASH_FLOW_RUB] = df[CALC_DISCOUNTED_BENEFIT_RUB] - df[CALC_DISCOUNTED_COST_RUB]
 
-    # Расчет NPV (накопленный дисконтированный денежный поток)
     df[CALC_NPV_RUB] = df[CALC_DISCOUNTED_CASH_FLOW_RUB].cumsum()
 
-    # Расчет дисконтированного ROI
     cumulative_discounted_costs = df[CALC_DISCOUNTED_COST_RUB].cumsum()
-    df[CALC_DISCOUNTED_ROI_PCT] = safe_divide(
+    # Используем where в np.divide для безопасного деления
+    df[CALC_DISCOUNTED_ROI_PCT] = np.divide(
         df[CALC_NPV_RUB],
-        cumulative_discounted_costs.replace(0, np.nan), # Заменяем 0 на NaN для safe_divide
-        default=0.0
+        cumulative_discounted_costs,
+        out=np.full_like(df[CALC_NPV_RUB], 0.0), # Заполняем нулями по умолчанию
+        where=cumulative_discounted_costs!=0
     ) * 100
+    # Дополнительно обработаем NaN, если они возникли из-за NaN в NPV
+    df[CALC_DISCOUNTED_ROI_PCT].fillna(0.0, inplace=True)
+
 
     return df
 
@@ -374,7 +346,8 @@ def plot_deterministic_results(df, plot_prefix):
     fig.tight_layout() # Чтобы подписи не накладывались
     plt.title('Динамика NPV и Инвестиций по годам')
     # Добавляем общую легенду
-    lns = bars + line
+    # lns = bars + line # Ошибка, bars - это BarContainer
+    lns = [bars] + line
     labs = [l.get_label() for l in lns]
     ax1.legend(lns, labs, loc='upper left')
     plt.savefig(f"{plot_prefix}_npv_investments.png", bbox_inches='tight')
@@ -403,7 +376,8 @@ def plot_deterministic_results(df, plot_prefix):
 
     fig.tight_layout()
     plt.title('Динамика Дисконтированного ROI и Инвестиций по годам')
-    lns = bars + line
+    # lns = bars + line # Ошибка
+    lns = [bars] + line
     labs = [l.get_label() for l in lns]
     ax1.legend(lns, labs, loc='upper left')
     plt.savefig(f"{plot_prefix}_roi_investments.png", bbox_inches='tight')
@@ -475,10 +449,11 @@ def plot_sensitivity(simulation_df, varied_inputs_map, plot_prefix):
         if input_col_name in simulation_df.columns:
             # Убираем NaN перед расчетом корреляции
             valid_data = simulation_df[[input_col_name, 'final_npv', 'final_roi']].dropna()
-            if not valid_data.empty:
-                corr_npv, _ = spearmanr(valid_data[input_col_name], valid_data['final_npv'])
-                corr_roi, _ = spearmanr(valid_data[input_col_name], valid_data['final_roi'])
+            if not valid_data.empty and len(valid_data) > 1: # Корреляция требует > 1 точки
+                corr_npv, p_npv = spearmanr(valid_data[input_col_name], valid_data['final_npv'])
+                corr_roi, p_roi = spearmanr(valid_data[input_col_name], valid_data['final_roi'])
                 label = input_labels.get(key, key) # Используем понятную метку
+                # Проверяем на NaN и значимость (p-value < 0.05) - опционально
                 correlations_npv[label] = corr_npv if not np.isnan(corr_npv) else 0.0
                 correlations_roi[label] = corr_roi if not np.isnan(corr_roi) else 0.0
             else:
@@ -499,7 +474,7 @@ def plot_sensitivity(simulation_df, varied_inputs_map, plot_prefix):
 
     # График для NPV
     plt.figure()
-    sns.barplot(x='Корреляция с NPV', y='Параметр', data=corr_df_npv, palette='viridis')
+    sns.barplot(x='Корреляция с NPV', y='Параметр', data=corr_df_npv, palette='viridis', hue='Параметр', legend=False)
     plt.title('Анализ чувствительности NPV (Корреляция Спирмена)')
     plt.xlabel('Коэффициент корреляции Спирмена')
     plt.ylabel('')
@@ -511,7 +486,7 @@ def plot_sensitivity(simulation_df, varied_inputs_map, plot_prefix):
 
     # График для ROI
     plt.figure()
-    sns.barplot(x='Корреляция с ROI', y='Параметр', data=corr_df_roi, palette='viridis')
+    sns.barplot(x='Корреляция с ROI', y='Параметр', data=corr_df_roi, palette='viridis', hue='Параметр', legend=False)
     plt.title('Анализ чувствительности Диск. ROI (Корреляция Спирмена)')
     plt.xlabel('Коэффициент корреляции Спирмена')
     plt.ylabel('')
@@ -522,15 +497,16 @@ def plot_sensitivity(simulation_df, varied_inputs_map, plot_prefix):
     plt.close()
 
 
-# --- Функция для выполнения симуляции Монте-Карло ---
-def run_monte_carlo(df_original, iterations, plot_prefix=None): # Добавили plot_prefix
-    """Выполняет симуляцию Монте-Карло."""
-    print(f"\nЗапуск симуляции Монте-Карло ({iterations} итераций)...")
+# --- Функция для выполнения симуляции Монте-Карло (Векторизованная) ---
+def run_monte_carlo_vectorized(df_original, iterations, plot_prefix=None):
+    """Выполняет симуляцию Монте-Карло, используя векторизованные операции NumPy."""
+    print(f"\nЗапуск векторизованной симуляции Монте-Карло ({iterations} итераций)...")
 
-    final_npvs = []
-    final_discounted_rois = []
-    # Сохраняем данные для анализа чувствительности
-    simulation_data = []
+    num_periods = len(df_original)
+    if num_periods == 0:
+        print("Ошибка: Входной DataFrame пуст.")
+        return
+
     # Определяем варьируемые входные параметры
     varied_inputs_map = {
         'costs': COL_PROJECT_COSTS_RUB,
@@ -538,91 +514,136 @@ def run_monte_carlo(df_original, iterations, plot_prefix=None): # Добавил
         'time': COL_TOTAL_PROC_TIME_HOURS
     }
 
-    # Параметры для варьирования
-    cost_std_dev_pct = 0.15 # Стандартное отклонение для затрат
-    requests_variation_pct = 0.10 # +/- вариация для числа запросов
-    time_std_dev_pct = 0.10 # Стандартное отклонение для времени обработки
+    # --- Извлечение базовых данных в NumPy массивы ---
+    # Варьируемые параметры (размер: num_periods)
+    base_costs = df_original[COL_PROJECT_COSTS_RUB].to_numpy()
+    base_requests = df_original[COL_TOTAL_REQUESTS].to_numpy()
+    base_proc_time = df_original[COL_TOTAL_PROC_TIME_HOURS].to_numpy()
 
-    for i in tqdm(range(iterations), desc="Симуляция"):
-        # Создаем копию для каждой итерации
-        sim_df = df_original.copy()
-        sim_inputs = {} # Сохраняем сгенерированные входы для этой итерации
+    # Остальные параметры, необходимые для расчетов (размер: num_periods)
+    period_days = df_original[COL_PERIOD_DAYS].to_numpy()
+    avg_proc_time_before_ai = df_original[COL_AVG_PROC_TIME_BEFORE_AI_HOURS].to_numpy()
+    # total_operating_costs = df_original[COL_TOTAL_OPERATING_COSTS_RUB].to_numpy() # Не используется напрямую в эффектах/ROI
+    text_processed_by_ai = df_original[COL_TEXT_PROCESSED_BY_AI].to_numpy() # Не варьируется, но нужно для расчета эффекта
+    avg_text_proc_manual = df_original[COL_AVG_TEXT_PROC_MANUAL_HOURS].to_numpy()
+    cost_per_hour = df_original[COL_COST_PER_HOUR_RUB].to_numpy()
+    discount_rate_pct = df_original[COL_DISCOUNT_RATE_ANNUAL_PCT].to_numpy()
 
-        # Генерируем случайные значения для варьируемых параметров
-        # 1. Затраты на проект (Нормальное распределение)
-        mean_costs = sim_df[COL_PROJECT_COSTS_RUB]
-        std_costs = mean_costs * cost_std_dev_pct
-        random_costs = np.random.normal(loc=mean_costs, scale=std_costs)
-        sim_df[COL_PROJECT_COSTS_RUB] = np.maximum(0, random_costs)
-        sim_inputs['avg_sim_costs'] = sim_df[COL_PROJECT_COSTS_RUB].mean() # Сохраняем среднее по периодам
+    # --- Генерация случайных вариаций (размер: num_periods x iterations) ---
+    cost_std_dev_pct = 0.15
+    requests_variation_pct = 0.10
+    time_std_dev_pct = 0.10
 
-        # 2. Общее число запросов (Равномерное распределение)
-        mean_requests = sim_df[COL_TOTAL_REQUESTS]
-        low_requests = mean_requests * (1 - requests_variation_pct)
-        high_requests = mean_requests * (1 + requests_variation_pct)
-        random_requests = np.random.uniform(low=low_requests, high=high_requests)
-        sim_df[COL_TOTAL_REQUESTS] = np.maximum(0, random_requests).astype(int)
-        sim_inputs['avg_sim_requests'] = sim_df[COL_TOTAL_REQUESTS].mean()
+    # Нормальное распределение для затрат
+    sim_costs = np.random.normal(
+        loc=base_costs[:, np.newaxis],
+        scale=(base_costs * cost_std_dev_pct)[:, np.newaxis],
+        size=(num_periods, iterations)
+    )
+    sim_costs = np.maximum(0, sim_costs) # Затраты >= 0
 
-        # 3. Суммарное время обработки (Нормальное распределение)
-        mean_time = sim_df[COL_TOTAL_PROC_TIME_HOURS]
-        std_time = mean_time * time_std_dev_pct
-        random_time = np.random.normal(loc=mean_time, scale=std_time)
-        sim_df[COL_TOTAL_PROC_TIME_HOURS] = np.maximum(0, random_time)
-        sim_inputs['avg_sim_time'] = sim_df[COL_TOTAL_PROC_TIME_HOURS].mean()
+    # Равномерное распределение для числа запросов
+    low_requests = base_requests * (1 - requests_variation_pct)
+    high_requests = base_requests * (1 + requests_variation_pct)
+    sim_requests = np.random.uniform(
+        low=low_requests[:, np.newaxis],
+        high=high_requests[:, np.newaxis],
+        size=(num_periods, iterations)
+    )
+    sim_requests = np.maximum(0, sim_requests).astype(int) # Запросы >= 0 и целые
 
-        # Выполняем полный пересчет для симулированных данных
-        # Подавляем вывод print внутри функций расчета во время симуляции
-        with open(os.devnull, 'w') as devnull:
-            original_stdout = sys.stdout
-            sys.stdout = devnull # Перенаправляем stdout
-            try:
-                sim_metrics_df = calculate_metrics(sim_df)
-                sim_effects_df = calculate_economic_effects(sim_metrics_df)
-                sim_roi_npv_df = calculate_roi_npv(sim_effects_df)
-            finally:
-                sys.stdout = original_stdout # Возвращаем stdout
+    # Нормальное распределение для времени обработки
+    sim_proc_time = np.random.normal(
+        loc=base_proc_time[:, np.newaxis],
+        scale=(base_proc_time * time_std_dev_pct)[:, np.newaxis],
+        size=(num_periods, iterations)
+    )
+    sim_proc_time = np.maximum(0, sim_proc_time) # Время >= 0
 
-        # Сохраняем итоговые результаты этой итерации
-        if not sim_roi_npv_df.empty:
-            final_npv = sim_roi_npv_df[CALC_NPV_RUB].iloc[-1]
-            final_roi = sim_roi_npv_df[CALC_DISCOUNTED_ROI_PCT].iloc[-1]
-            final_npvs.append(final_npv)
-            final_discounted_rois.append(final_roi)
-            # Сохранение данных для анализа чувствительности
-            sim_data_point = {
-                'iteration': i,
-                'final_npv': final_npv,
-                'final_roi': final_roi,
-                **sim_inputs # Добавляем средние значения входов
-            }
-            simulation_data.append(sim_data_point)
+    # --- Векторизованные расчеты для всех итераций ---
+    print("Выполнение векторизованных расчетов...")
 
-    # Расчет и вывод статистик
+    # Расширяем неварьируемые параметры до размера (num_periods, iterations)
+    avg_proc_time_before_ai_matrix = avg_proc_time_before_ai[:, np.newaxis]
+    cost_per_hour_matrix = cost_per_hour[:, np.newaxis]
+    avg_text_proc_manual_matrix = avg_text_proc_manual[:, np.newaxis]
+    text_processed_by_ai_matrix = text_processed_by_ai[:, np.newaxis]
+    discount_rate_matrix = (discount_rate_pct / 100.0)[:, np.newaxis]
+
+    # Метрики (только необходимые для эффектов)
+    metric_avg_proc_time = safe_divide_np(sim_proc_time, sim_requests)
+    metric_hours_saved = (avg_proc_time_before_ai_matrix - metric_avg_proc_time) * sim_requests
+    metric_hours_saved = np.maximum(0, metric_hours_saved) # clip(lower=0)
+
+    # Эффекты
+    effect_fot_savings = metric_hours_saved * cost_per_hour_matrix
+    effect_text_proc_savings = text_processed_by_ai_matrix * avg_text_proc_manual_matrix * cost_per_hour_matrix
+
+    # Совокупная выгода
+    total_benefit = effect_fot_savings + effect_text_proc_savings
+
+    # NPV и Дисконтированный ROI
+    period_year = (np.arange(num_periods) * 0.5)[:, np.newaxis] # (num_periods, 1)
+    discount_factor = 1 / (1 + discount_rate_matrix)**period_year
+
+    discounted_benefit = total_benefit * discount_factor
+    discounted_cost = sim_costs * discount_factor
+    discounted_cash_flow = discounted_benefit - discounted_cost
+
+    # NPV (накопленный) - кумулятивная сумма по оси периодов (axis=0)
+    npv = np.cumsum(discounted_cash_flow, axis=0)
+
+    # Дисконтированный ROI
+    cumulative_discounted_costs = np.cumsum(discounted_cost, axis=0)
+    discounted_roi = safe_divide_np(npv, cumulative_discounted_costs) * 100
+
+    # --- Извлечение итоговых результатов симуляции ---
+    final_npvs = npv[-1, :] # Последний период для всех итераций
+    final_discounted_rois = discounted_roi[-1, :] # Последний период для всех итераций
+
+    # --- Сбор данных для анализа чувствительности ---
+    simulation_results_list = []
+    # Сохраняем средние значения симулированных входов по периодам для каждой итерации
+    avg_sim_costs = np.mean(sim_costs, axis=0)
+    avg_sim_requests = np.mean(sim_requests, axis=0)
+    avg_sim_time = np.mean(sim_proc_time, axis=0)
+
+    for i in range(iterations):
+        sim_data_point = {
+            'iteration': i,
+            'final_npv': final_npvs[i],
+            'final_roi': final_discounted_rois[i],
+            'avg_sim_costs': avg_sim_costs[i],
+            'avg_sim_requests': avg_sim_requests[i],
+            'avg_sim_time': avg_sim_time[i]
+        }
+        simulation_results_list.append(sim_data_point)
+    simulation_results_df = pd.DataFrame(simulation_results_list)
+
+
+    # --- Расчет и вывод статистик ---
     print("\n--- Результаты симуляции Монте-Карло ---")
-    if final_npvs and final_discounted_rois:
-        npv_array = np.array(final_npvs)
-        roi_array = np.array(final_discounted_rois)
-
+    if final_npvs.size > 0 and final_discounted_rois.size > 0:
         print("\nСтатистики для Итогового NPV:")
-        print(f"  Среднее: {np.mean(npv_array):,.2f} Руб")
-        print(f"  Медиана: {np.median(npv_array):,.2f} Руб")
-        print(f"  Стандартное отклонение: {np.std(npv_array):,.2f} Руб")
-        print(f"  5-й перцентиль: {np.percentile(npv_array, 5):,.2f} Руб")
-        print(f"  95-й перцентиль: {np.percentile(npv_array, 95):,.2f} Руб")
-        print(f"  Вероятность положительного NPV: {np.mean(npv_array > 0) * 100:.2f}%")
+        print(f"  Среднее: {np.mean(final_npvs):,.2f} Руб")
+        print(f"  Медиана: {np.median(final_npvs):,.2f} Руб")
+        print(f"  Стандартное отклонение: {np.std(final_npvs):,.2f} Руб")
+        print(f"  5-й перцентиль: {np.percentile(final_npvs, 5):,.2f} Руб")
+        print(f"  95-й перцентиль: {np.percentile(final_npvs, 95):,.2f} Руб")
+        print(f"  Вероятность положительного NPV: {np.mean(final_npvs > 0) * 100:.2f}%")
 
         print("\nСтатистики для Итогового Дисконтированного ROI:")
-        print(f"  Среднее: {np.mean(roi_array):.2f}%")
-        print(f"  Медиана: {np.median(roi_array):.2f}%")
-        print(f"  Стандартное отклонение: {np.std(roi_array):.2f}%")
-        print(f"  5-й перцентиль: {np.percentile(roi_array, 5):.2f}%")
-        print(f"  95-й перцентиль: {np.percentile(roi_array, 95):.2f}%")
+        print(f"  Среднее: {np.mean(final_discounted_rois):.2f}%")
+        print(f"  Медиана: {np.median(final_discounted_rois):.2f}%")
+        print(f"  Стандартное отклонение: {np.std(final_discounted_rois):.2f}%")
+        print(f"  5-й перцентиль: {np.percentile(final_discounted_rois, 5):.2f}%")
+        print(f"  95-й перцентиль: {np.percentile(final_discounted_rois, 95):.2f}%")
 
         # Построение графиков симуляции, если указан префикс
         if plot_prefix:
-            plot_simulation_distributions(npv_array, roi_array, plot_prefix)
-            plot_sensitivity(pd.DataFrame(simulation_data), varied_inputs_map, plot_prefix)
+            plot_simulation_distributions(final_npvs, final_discounted_rois, plot_prefix)
+            # Передаем DataFrame с результатами симуляции для анализа чувствительности
+            plot_sensitivity(simulation_results_df, varied_inputs_map, plot_prefix)
     else:
         print("Не удалось собрать результаты симуляций.")
 
@@ -646,21 +667,15 @@ def main():
     data_df = load_data(args.input_csv)
 
     if args.simulate:
-        # Выполняем симуляцию Монте-Карло
-        run_monte_carlo(data_df, args.iterations, args.plot_prefix) # Передаем префикс
+        # Выполняем векторизованную симуляцию Монте-Карло
+        run_monte_carlo_vectorized(data_df, args.iterations, args.plot_prefix)
     else:
         # Выполняем стандартный детерминированный расчет
         print("Выполнение детерминированного расчета...")
-        # Подавляем вывод print внутри функций расчета
-        with open(os.devnull, 'w') as devnull:
-            original_stdout = sys.stdout
-            sys.stdout = devnull
-            try:
-                metrics_df = calculate_metrics(data_df.copy())
-                effects_df = calculate_economic_effects(metrics_df)
-                roi_npv_df = calculate_roi_npv(effects_df)
-            finally:
-                sys.stdout = original_stdout # Возвращаем stdout
+        # Используем _df версии функций
+        metrics_df = calculate_metrics_df(data_df.copy())
+        effects_df = calculate_economic_effects_df(metrics_df)
+        roi_npv_df = calculate_roi_npv_df(effects_df)
 
         save_results(roi_npv_df, args.output)
         print("Детерминированный расчет завершен.")
