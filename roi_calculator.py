@@ -608,7 +608,7 @@ def run_monte_carlo_vectorized(df_original, iterations, plot_prefix=None):
     avg_sim_requests = np.mean(sim_requests, axis=0)
     avg_sim_time = np.mean(sim_proc_time, axis=0)
 
-    for i in range(iterations):
+    for i in tqdm(range(iterations), desc="Сбор данных для анализа"): # Добавили tqdm сюда
         sim_data_point = {
             'iteration': i,
             'final_npv': final_npvs[i],
